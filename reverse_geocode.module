@@ -1,0 +1,290 @@
+<?php
+
+/**
+ * The Reverse Geocode API call.
+ * @example:
+ *    reverse_geocode(latitude,longitude);
+ */
+function reverse_geocode($latitude = 0, $longitude = 0) {
+  ctools_include('plugins');
+
+  $args = func_get_args();
+  $processor_name = array_shift($args);
+  $processor = ctools_get_plugins('reverse_geocode', 'reverse_geocode_handler', $processor_name);
+  $geometry = call_user_func_array($processor['callback'],$args);
+
+  return $geometry;
+}
+
+/**
+ * Return a list of all handlers that might reverse geocode something for you.
+ */
+function reverse_geocode_handler_info($field_type = NULL) {
+  ctools_include('plugins');
+
+  static $handlers;
+  if (!$handlers) {
+    $handlers = ctools_get_plugins('reverse_geocode', 'reverse_geocode_handler');
+  }
+  if ($field_type) {
+    $field_handlers = $handlers;
+    foreach($field_handlers as $i => $handler) {
+      if (!isset($handler['field_types']) || !in_array($field_type, $handler['field_types'])) {
+        unset($field_handlers[$i]);
+      }
+    }
+    return $field_handlers;
+  }
+  return $handlers;
+}
+
+function reverse_geocode_get_handler($handler_name) {
+  $handlers = reverse_geocode_handler_info();
+  return $handlers[$handler_name];
+}
+
+function reverse_geocode_supported_field_types() {
+  $supported = array();
+
+  $processors = reverse_geocode_handler_info();
+
+  foreach ($processors as $processor) {
+    if (isset($processor['field_types'])) {
+      foreach ($processor['field_types'] as $field_type) {
+        $supported[$field_type][] = $processor['name'];
+      }
+    }
+  }
+
+	return $supported;
+}
+
+function reverse_geocode_load_geophp() {
+  static $static_cache = FALSE;
+
+  if (!$static_cache) {
+    $path = libraries_get_path('geoPHP');
+    $file = $path.'/geoPHP.inc';
+    if (file_exists($file)) {
+      if (include_once($file)) {
+        $static_cache = $file;
+      }
+    }
+  }
+
+  return $static_cache;
+}
+
+
+/**
+ * Implementation of hook_ctools_plugin_api().
+ */
+function reverse_geocode_ctools_plugin_api() {
+  return array('version' => 1);
+}
+
+/**
+ * Implementation of hook_ctools_plugin_dierctory() to let the system know
+ * we implement plugins.
+ */
+function reverse_geocode_ctools_plugin_directory($module, $plugin) {
+  return 'plugins/' . $plugin;
+}
+
+/**
+ * Implements hook_ctools_plugin_type
+ */
+function reverse_geocode_ctools_plugin_type() {
+  return array(
+    'reverse_geocode_handler' => array(),
+  );
+}
+
+/**
+ * Implements hook_field_widget_info().
+ */
+function reverse_geocode_field_widget_info() {
+  return array(
+    'reverse_geocode' => array(
+      'label' => t('Reverse geocode from another field'),
+      'field types' => array('text'),
+    ),
+  );
+}
+
+/**
+ * Implements field_widget_settings_form().
+ */
+function reverse_geocode_field_widget_settings_form($this_field, $instance) {
+  $settings = $instance['widget']['settings'];
+
+  $entity_fields = field_info_instances($instance['entity_type'], $instance['bundle']);
+  $all_fields = field_info_fields();
+  $supported_field_types = reverse_geocode_supported_field_types();
+  $processors = reverse_geocode_handler_info();
+  $handlers_by_type = array();
+  $field_types = array();
+  $valid_fields = array();
+  $available_handlers = array();
+
+  // Add in the title/name
+  switch ($instance['entity_type']) {
+    case 'node':
+      $all_fields['title'] = array(
+        'field_name' => 'title',
+        'type' => 'geofield',
+      );
+
+      $entity_fields['title']['label'] = t('Title');
+      break;
+
+    case 'taxonomy_term':
+      $all_fields['name'] = array(
+        'field_name' => 'name',
+        'type' => 'geofield',
+      );
+
+      $entity_fields['name']['label'] = t('Name');
+      break;
+  }
+
+
+  // Get a list of all valid fields that we both support and are part of this entity
+  foreach ($all_fields as $field) {
+    if (array_key_exists($field['field_name'], $entity_fields)) {
+      if (in_array($field['type'], array_keys($supported_field_types)) && ($field['field_name'] != $this_field['field_name'])) {
+        $valid_fields[$field['field_name']] = $entity_fields[$field['field_name']]['label'];
+        foreach ($supported_field_types[$field['type']] as $handler) {
+          $available_handlers[$handler] = $processors[$handler]['title'];
+          $handlers_by_type[$field['type']][] = $handler;
+          $field_types[$field['field_name']] = $field['type'];
+        }
+      }
+    }
+  }
+
+  $form['reverse_geocode_field'] = array(
+    '#type' => 'select',
+    '#title' => t('Reverse geocode from field'),
+    '#default_value' => isset($settings['reverse_geocode_field']) ? $settings['reverse_geocode_field']: '',
+    '#options' => $valid_fields,
+    '#description' => t('Select which field you would like to reverse geocode from.'),
+    '#required' => TRUE,
+    '#attributes' => array('onchange' => 'reverse_geocode_admin_handler_filter();'),
+  );
+
+  $form['reverse_geocode_handler'] = array(
+    '#type' => 'select',
+    '#title' => t('Reverse geocoder'),
+    '#prefix' => '<div id="reverse-geocode-handler-div">',
+    '#suffix' => '</div>',
+    '#default_value' => isset($settings['reverse_geocode_handler']) ? $settings['reverse_geocode_handler']: '',
+    '#options' => $available_handlers,
+    '#description' => t('Select which type of reverse geocoding handler you would like to use'),
+    '#required' => TRUE,
+  );
+
+  drupal_add_js(array('reverse_geocode_widget_settings' => array('handlers' => $handlers_by_type, 'types' => $field_types)),'setting');
+  drupal_add_js(drupal_get_path('module','reverse_geocode').'/reverse_geocode.admin.js','file');
+
+  return $form;
+}
+
+function reverse_geocode_field_widget_settings_form_callback($form, $form_state) {
+  return $form['reverse_geocode_handler'];
+}
+
+/**
+ * Implements hook_field_widget_form().
+ */
+function reverse_geocode_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $base) {
+  $element = $base;
+
+  $element['wkt'] = array(
+   '#type' => 'hidden',
+   '#element_validate' => array('reverse_geocode_widget_validate'),
+  );
+  $element['reverse_geocode_target'] = array(
+   '#type' => 'hidden',
+   '#value' => $instance['field_name'],
+  );
+  $element['reverse_geocode_source'] = array(
+   '#type' => 'hidden',
+   '#value' => isset($instance['widget']['settings']['reverse_geocode_field']) ? $instance['widget']['settings']['reverse_geocode_field'] : '',
+  );
+  $element['reverse_geocode_handler'] = array(
+   '#type' => 'hidden',
+   '#value' => isset($instance['widget']['settings']['reverse_geocode_handler']) ? $instance['widget']['settings']['reverse_geocode_handler'] : '',
+  );
+
+  return $element;
+}
+
+
+function reverse_geocode_widget_validate($element, &$form_state) {
+  // To validate, we simply run through the form fields, looking for items with reverse_geocode_source and reverse_geocode_target properties
+
+  // Walk the form_state values, applying all instances of geocode source and target operations
+  foreach ($form_state['values'] as &$field) {
+    reverse_geocode_widget_validate_walkthrough($field, $form_state);
+  }
+
+  if (isset($form_state['field']['#parents'])) {
+    //Walk through the fields that are under parents and match up and sources and targets there
+    foreach ($form_state['field']['#parents'] as $parent => $parent_data) {
+      foreach ($form_state['values'][$parent] as &$field) {
+        reverse_geocode_widget_validate_walkthrough($field, $form_state, $parent);
+      }
+    }
+  }
+}
+
+
+function reverse_geocode_widget_validate_walkthrough(&$field, $form_state, $parent = NULL) {
+
+  if (is_array($field)) {
+    $lang = isset($form_state['values']['language']) ? $form_state['values']['language'] : LANGUAGE_NONE;
+    if ((!empty($field[$lang][0]['reverse_geocode_source']) && !empty($field[$lang][0]['reverse_geocode_target']) && !empty($field[$lang][0]['reverse_geocode_handler']))) {
+
+      // We found a source/target/handler set, let's do this.
+      $source = $field[$lang][0]['reverse_geocode_source'];
+      $handler = reverse_geocode_get_handler($field[$lang][0]['reverse_geocode_handler']);
+      $field[$lang] = array();
+
+      $field_object = field_info_field($source);
+      if (isset($parent)) {
+        if (isset($form_state['values'][$parent][$source][$lang])) {
+          foreach ($form_state['values'][$parent][$source][$lang] as $delta => $item) {
+
+            try {
+              $location = call_user_func($handler['field_callback'],$field_object, $item);
+            }
+            catch(Exception $e) {
+              drupal_set_message($e->getMessage(),'error');
+              return;
+            }
+            if ($location) {	
+              $field[$lang][$delta] = array('value' => $location);
+            }
+          }
+        }
+      } else {
+        if (isset($form_state['values'][$source][$lang])) {
+          foreach ($form_state['values'][$source][$lang] as $delta => $item) {
+            try {
+              $location = call_user_func($handler['field_callback'],$field_object, $item);
+            }
+            catch(Exception $e) {
+              drupal_set_message($e->getMessage(),'error');
+              return;
+            }
+
+            if ($location) {	
+              $field[$lang][$delta] = array('value' => $location);
+            }
+          }
+        }
+      }
+    }
+  }
+}

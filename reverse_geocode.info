@@ -1,0 +1,7 @@
+; $Id$
+name = Reverse Geocode
+description = Work out the general label for a geographical point (lat,long)
+core = 7.x
+dependencies[] = libraries
+dependencies[] = ctools
+dependencies[] = geofield
